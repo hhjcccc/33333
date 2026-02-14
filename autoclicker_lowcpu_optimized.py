@@ -64,7 +64,10 @@ class AutoClickerLowCPUOptimized:
 
         self.click_count = 0
 
-        self.sct = mss.mss()
+        # 注意：mss 在 Windows 下内部句柄是 thread-local 的，
+        # 不能在一个线程创建后在另一个线程直接复用。
+        # 因此主线程不持有全局 mss 实例，检测线程内按线程创建并复用。
+        self.sct = None
         self.capture_region = {
             "left": self.cx - self.region_half,
             "top": self.cy - self.region_half,
@@ -108,9 +111,9 @@ class AutoClickerLowCPUOptimized:
 
     # ================= 图像 =================
 
-    def capture(self):
+    def capture(self, sct):
         # BGRA -> ndarray
-        return np.asarray(self.sct.grab(self.capture_region))
+        return np.asarray(sct.grab(self.capture_region))
 
     @staticmethod
     def red_mask(img):
@@ -204,12 +207,13 @@ class AutoClickerLowCPUOptimized:
     # ================= 检测线程 =================
 
     def _detection_worker(self):
+        sct = mss.mss()
         while not self.exit_program:
             if not self.running:
                 time.sleep(0.01)
                 continue
 
-            img = self.capture()
+            img = self.capture(sct)
             det = self.detect_crosshair(img)
             now = time.monotonic()
 

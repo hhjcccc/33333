@@ -1,6 +1,9 @@
+import argparse
+import json
 import threading
 import time
 from dataclasses import dataclass
+from pathlib import Path
 
 import mss
 import numpy as np
@@ -17,9 +20,54 @@ class DetectionState:
 
 
 class AutoClickerLowCPUOptimized:
-    """CPU 优化版：预计算掩码 + 检测/动作分离线程 + 低分配开销。"""
+    """CPU 优化版：支持 JSON 配置文件。"""
 
-    def __init__(self):
+    DEFAULT_CONFIG = {
+        "region_half": 70,
+        "inner_r": 40,
+        "outer_r": 70,
+        "cross_r": 12,
+        "sleep_interval": 0.003,
+        "detect_interval": 0.0015,
+        "fire_cooldown": 0.06,
+        "red_grace_time": 0.09,
+        "max_red_hold_time": 0.2,
+        "switch_weapon_mode": False,
+        "switch_delay": 0.2,
+        "post_switch_block": 0.3,
+        "weapon_cycle": [2, 3, 5, 4, 6],
+        "current_weapon": 2,
+        "melee_weapons": [3],
+        "target_hold_time": 0.01,
+        "red_threshold": {"r_min": 230, "g_max": 25, "b_max": 25},
+    }
+
+    @classmethod
+    def load_config(cls, config_path=None):
+        cfg = dict(cls.DEFAULT_CONFIG)
+        if not config_path:
+            return cfg
+
+        path = Path(config_path)
+        if not path.exists():
+            print(f"[WARN] 配置文件不存在，使用默认配置: {path}")
+            return cfg
+
+        with path.open("r", encoding="utf-8") as f:
+            user_cfg = json.load(f)
+
+        for k, v in user_cfg.items():
+            if k == "red_threshold" and isinstance(v, dict):
+                merged = dict(cfg["red_threshold"])
+                merged.update(v)
+                cfg["red_threshold"] = merged
+            else:
+                cfg[k] = v
+        return cfg
+
+    def __init__(self, config=None):
+        self.config = dict(self.DEFAULT_CONFIG if config is None else config)
+
         self.running = False
         self.exit_program = False
 
@@ -27,46 +75,50 @@ class AutoClickerLowCPUOptimized:
         self.cx, self.cy = self.sw // 2, self.sh // 2
 
         # ---------- 识别区域 ----------
-        self.region_half = 70
-        self.inner_r = 40
-        self.outer_r = 70
-        self.cross_r = 12
+        self.region_half = int(self.config["region_half"])
+        self.inner_r = int(self.config["inner_r"])
+        self.outer_r = int(self.config["outer_r"])
+        self.cross_r = int(self.config["cross_r"])
 
         # ---------- 时间参数 ----------
-        self.sleep_interval = 0.003
-        self.detect_interval = 0.0015
-        self.fire_cooldown = 0.06
+        self.sleep_interval = float(self.config["sleep_interval"])
+        self.detect_interval = float(self.config["detect_interval"])
+        self.fire_cooldown = float(self.config["fire_cooldown"])
 
         # ---------- 红色行为 ----------
-        self.red_grace_time = 0.09
-        self.max_red_hold_time = 0.2
+        self.red_grace_time = float(self.config["red_grace_time"])
+        self.max_red_hold_time = float(self.config["max_red_hold_time"])
         self.last_red_time = 0.0
         self.force_red_reset_time = 0.0
 
         # ---------- 切枪 ----------
-        self.switch_weapon_mode = False
-        self.switch_delay = 0.2
-        self.post_switch_block = 0.3
+        self.switch_weapon_mode = bool(self.config["switch_weapon_mode"])
+        self.switch_delay = float(self.config["switch_delay"])
+        self.post_switch_block = float(self.config["post_switch_block"])
         self.pending_switch = False
         self.switch_time = 0.0
         self.block_fire_until = 0.0
 
         # ---------- 武器 ----------
-        self.weapon_cycle = [2, 3, 5, 4, 6]
-        self.current_weapon = 2
-        self.melee_weapons = {3}
+        self.weapon_cycle = list(self.config["weapon_cycle"])
+        self.current_weapon = int(self.config["current_weapon"])
+        self.melee_weapons = set(self.config["melee_weapons"])
 
         # ---------- 射击状态 ----------
         self.shot_fired_this_weapon = False
         self.target_hold_start = 0.0
-        self.target_hold_time = 0.01
+        self.target_hold_time = float(self.config["target_hold_time"])
         self.last_fire_time = 0.0
+
+        # ---------- 红色阈值 ----------
+        thr = self.config["red_threshold"]
+        self.r_min = int(thr["r_min"])
+        self.g_max = int(thr["g_max"])
+        self.b_max = int(thr["b_max"])
 
         self.click_count = 0
 
-        # 注意：mss 在 Windows 下内部句柄是 thread-local 的，
-        # 不能在一个线程创建后在另一个线程直接复用。
-        # 因此主线程不持有全局 mss 实例，检测线程内按线程创建并复用。
+        # mss 句柄线程内创建
         self.sct = None
         self.capture_region = {
             "left": self.cx - self.region_half,
@@ -78,15 +130,11 @@ class AutoClickerLowCPUOptimized:
         self.h = self.capture_region["height"]
         self.w = self.capture_region["width"]
 
-        # 预计算几何掩码：避免每帧 np.where + for + hypot
         self.annulus_mask, self.dir_masks = self._build_ring_masks()
 
-        # 跨线程检测状态
         self._det_state = DetectionState()
         self._det_lock = threading.Lock()
         self._det_thread = None
-
-    # ================= 预计算 =================
 
     def _build_ring_masks(self):
         y, x = np.ogrid[: self.h, : self.w]
@@ -96,7 +144,6 @@ class AutoClickerLowCPUOptimized:
         d = np.hypot(dx, dy)
 
         annulus = (d >= self.inner_r) & (d <= self.outer_r)
-
         dir_masks = {
             "L": (np.abs(dy) < 8) & (dx < 0),
             "R": (np.abs(dy) < 8) & (dx > 0),
@@ -109,22 +156,17 @@ class AutoClickerLowCPUOptimized:
         }
         return annulus, dir_masks
 
-    # ================= 图像 =================
-
     def capture(self, sct):
-        # BGRA -> ndarray
         return np.asarray(sct.grab(self.capture_region))
 
-    @staticmethod
-    def red_mask(img):
+    def red_mask(self, img):
         b = img[:, :, 0]
         g = img[:, :, 1]
         r = img[:, :, 2]
-        return (r >= 230) & (g < 25) & (b < 25)
+        return (r >= self.r_min) & (g < self.g_max) & (b < self.b_max)
 
     def detect_ring(self, mask):
         ring_red = mask & self.annulus_mask
-
         if ring_red.sum() < 10:
             return False
 
@@ -147,8 +189,6 @@ class AutoClickerLowCPUOptimized:
         mask = self.red_mask(img)
         return self.detect_ring(mask) or self.detect_cross(mask)
 
-    # ================= 状态 =================
-
     def reset_red_state(self):
         self.last_red_time = 0.0
         self.force_red_reset_time = 0.0
@@ -156,8 +196,6 @@ class AutoClickerLowCPUOptimized:
 
     def reset_per_weapon_fire_state(self):
         self.shot_fired_this_weapon = False
-
-    # ================= 武器 =================
 
     def get_next_weapon(self):
         idx = self.weapon_cycle.index(self.current_weapon)
@@ -181,16 +219,12 @@ class AutoClickerLowCPUOptimized:
         else:
             self.block_fire_until = now + self.post_switch_block
 
-    # ================= 鼠标 =================
-
     def click_left(self):
         win32api.mouse_event(win32con.MOUSEEVENTF_LEFTDOWN, 0, 0, 0, 0)
         time.sleep(0.005)
         win32api.mouse_event(win32con.MOUSEEVENTF_LEFTUP, 0, 0, 0, 0)
         self.click_count += 1
         self.last_fire_time = time.monotonic()
-
-    # ================= 键盘 =================
 
     def on_press(self, key):
         if key == pynput_keyboard.Key.f2:
@@ -203,8 +237,6 @@ class AutoClickerLowCPUOptimized:
             self.switch_weapon_mode = not self.switch_weapon_mode
             time.sleep(0.15)
         return None
-
-    # ================= 检测线程 =================
 
     def _detection_worker(self):
         sct = mss.mss()
@@ -227,14 +259,14 @@ class AutoClickerLowCPUOptimized:
         with self._det_lock:
             return self._det_state.detected, self._det_state.ts
 
-    # ================= 主循环（动作状态机） =================
-
     def run(self):
         print("=" * 60)
-        print("Pixel Gun 3D 自动射击（CPU 优化版）")
+        print("Pixel Gun 3D 自动射击（CPU 优化版 / 配置文件版）")
         print("F2 启动/停止 | F3 退出 | F8 切枪模式")
         print("循环武器:", self.weapon_cycle)
         print("近战跳过:", self.melee_weapons)
+        print("识别区域:", self.capture_region)
+        print("红色阈值:", {"r_min": self.r_min, "g_max": self.g_max, "b_max": self.b_max})
         print("=" * 60)
 
         pynput_keyboard.Listener(on_press=self.on_press).start()
@@ -300,6 +332,18 @@ class AutoClickerLowCPUOptimized:
         print("程序结束，总射击次数:", self.click_count)
 
 
+def parse_args():
+    parser = argparse.ArgumentParser(description="AutoClicker CPU 优化版（配置文件）")
+    parser.add_argument(
+        "--config",
+        default="autoclicker_config.json",
+        help="JSON 配置文件路径（默认: autoclicker_config.json）",
+    )
+    return parser.parse_args()
+
+
 if __name__ == "__main__":
     pyautogui.FAILSAFE = True
-    AutoClickerLowCPUOptimized().run()
+    args = parse_args()
+    config = AutoClickerLowCPUOptimized.load_config(args.config)
+    AutoClickerLowCPUOptimized(config=config).run()

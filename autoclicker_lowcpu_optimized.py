@@ -39,6 +39,7 @@ class AutoClickerLowCPUOptimized:
         "current_weapon": 2,
         "melee_weapons": [3],
         "target_hold_time": 0.01,
+        "stuck_rearm_time": 0.25,
         "red_threshold": {"r_min": 230, "g_max": 25, "b_max": 25},
     }
 
@@ -107,7 +108,9 @@ class AutoClickerLowCPUOptimized:
         # ---------- 射击状态 ----------
         self.shot_fired_this_weapon = False
         self.target_hold_start = 0.0
+        self.weapon_seen_red_since = 0.0
         self.target_hold_time = float(self.config["target_hold_time"])
+        self.stuck_rearm_time = float(self.config.get("stuck_rearm_time", 0.25))
         self.last_fire_time = 0.0
 
         # ---------- 红色阈值 ----------
@@ -193,6 +196,7 @@ class AutoClickerLowCPUOptimized:
         self.last_red_time = 0.0
         self.force_red_reset_time = 0.0
         self.target_hold_start = 0.0
+        self.weapon_seen_red_since = 0.0
 
     def reset_per_weapon_fire_state(self):
         self.shot_fired_this_weapon = False
@@ -278,9 +282,13 @@ class AutoClickerLowCPUOptimized:
             now = time.monotonic()
 
             if self.pending_switch and now >= self.switch_time:
+                # 只允许“已开火”或“当前是近战跳过”时切枪，防止出现只切不射
+                if self.current_weapon in self.melee_weapons or self.shot_fired_this_weapon:
+                    self.pending_switch = False
+                    self.press_weapon_key(self.get_next_weapon())
+                    continue
+                # 非近战且本武器还没射击：取消这次切枪，优先保证先开火
                 self.pending_switch = False
-                self.press_weapon_key(self.get_next_weapon())
-                continue
 
             if now < self.block_fire_until:
                 time.sleep(self.sleep_interval)
@@ -305,6 +313,17 @@ class AutoClickerLowCPUOptimized:
                     continue
 
                 self.last_red_time = now
+
+                # 连续红光晕场景：如果长时间检测到红色但本武器仍未开火，强制重置 hold 重新触发
+                if self.weapon_seen_red_since == 0.0:
+                    self.weapon_seen_red_since = now
+                elif (
+                    not self.shot_fired_this_weapon
+                    and self.current_weapon not in self.melee_weapons
+                    and now - self.weapon_seen_red_since >= self.stuck_rearm_time
+                ):
+                    self.target_hold_start = now
+                    self.weapon_seen_red_since = now
 
                 can_fire = (
                     self.target_hold_start > 0

@@ -11,13 +11,22 @@
   "switch_weapon_mode": false,
   "switch_delay": 0.2,
   "post_switch_block": 0.3,
-  "weapon_cycle": [2, 3, 5, 4, 6],
+  "weapon_cycle": [
+    2,
+    3,
+    5,
+    4,
+    6
+  ],
   "current_weapon": 2,
-  "melee_weapons": [3],
+  "melee_weapons": [
+    3
+  ],
   "target_hold_time": 0.01,
   "red_threshold": {
     "r_min": 230,
     "g_max": 25,
     "b_max": 25
-  }
+  },
+  "stuck_rearm_time": 0.25
 }

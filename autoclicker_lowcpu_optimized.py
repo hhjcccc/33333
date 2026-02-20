@@ -34,6 +34,7 @@ class AutoClickerLowCPUOptimized:
         "max_red_hold_time": 0.2,
         "switch_weapon_mode": False,
         "switch_delay": 0.2,
+        "min_switch_after_shot": 0.14,
         "post_switch_block": 0.3,
         "weapon_cycle": [2, 3, 5, 4, 6],
         "current_weapon": 2,
@@ -95,6 +96,7 @@ class AutoClickerLowCPUOptimized:
         # ---------- 切枪 ----------
         self.switch_weapon_mode = bool(self.config["switch_weapon_mode"])
         self.switch_delay = float(self.config["switch_delay"])
+        self.min_switch_after_shot = float(self.config.get("min_switch_after_shot", 0.14))
         self.post_switch_block = float(self.config["post_switch_block"])
         self.pending_switch = False
         self.switch_time = 0.0
@@ -273,6 +275,7 @@ class AutoClickerLowCPUOptimized:
         print("近战跳过:", self.melee_weapons)
         print("识别区域:", self.capture_region)
         print("红色阈值:", {"r_min": self.r_min, "g_max": self.g_max, "b_max": self.b_max})
+        print("切枪延迟:", self.switch_delay, "| 最小开火后切枪:", self.min_switch_after_shot)
         print("=" * 60)
 
         pynput_keyboard.Listener(on_press=self.on_press).start()
@@ -346,7 +349,8 @@ class AutoClickerLowCPUOptimized:
                     if self.switch_weapon_mode and not self.pending_switch:
                         self.pending_switch = True
                         self.switch_armed_by_shot = True
-                        self.switch_time = now + self.switch_delay
+                        switch_wait = max(self.switch_delay, self.min_switch_after_shot)
+                        self.switch_time = now + switch_wait
             else:
                 if now - self.last_red_time > self.red_grace_time:
                     self.reset_red_state()

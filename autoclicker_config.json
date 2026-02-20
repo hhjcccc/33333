@@ -10,6 +10,7 @@
   "max_red_hold_time": 0.2,
   "switch_weapon_mode": false,
   "switch_delay": 0.2,
+  "min_switch_after_shot": 0.14,
   "post_switch_block": 0.3,
   "weapon_cycle": [
     2,

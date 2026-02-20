@@ -42,6 +42,7 @@ class AutoClickerLowCPUOptimized:
         "target_hold_time": 0.01,
         "stuck_rearm_time": 0.25,
         "red_threshold": {"r_min": 230, "g_max": 25, "b_max": 25},
+        "ring_fill_max": 0.72,
     }
 
     @classmethod
@@ -121,6 +122,7 @@ class AutoClickerLowCPUOptimized:
         self.r_min = int(thr["r_min"])
         self.g_max = int(thr["g_max"])
         self.b_max = int(thr["b_max"])
+        self.ring_fill_max = float(self.config.get("ring_fill_max", 0.72))
 
         self.click_count = 0
 
@@ -173,7 +175,13 @@ class AutoClickerLowCPUOptimized:
 
     def detect_ring(self, mask):
         ring_red = mask & self.annulus_mask
-        if ring_red.sum() < 10:
+        red_pixels = int(ring_red.sum())
+        if red_pixels < 10:
+            return False
+
+        # 纯红背景会把整圈填满，容易误判成“红圈准星”
+        fill_ratio = red_pixels / float(self.annulus_mask.sum())
+        if fill_ratio > self.ring_fill_max:
             return False
 
         d = {k: bool((ring_red & m).any()) for k, m in self.dir_masks.items()}
@@ -208,7 +216,7 @@ class AutoClickerLowCPUOptimized:
         idx = self.weapon_cycle.index(self.current_weapon)
         return self.weapon_cycle[(idx + 1) % len(self.weapon_cycle)]
 
-    def press_weapon_key(self, num):
+    def press_weapon_key(self, num, from_shot_chain=False):
         sc = {1: 0x02, 2: 0x03, 3: 0x04, 4: 0x05, 5: 0x06, 6: 0x07}[num]
         win32api.keybd_event(0, sc, win32con.KEYEVENTF_SCANCODE, 0)
         time.sleep(0.01)
@@ -220,8 +228,12 @@ class AutoClickerLowCPUOptimized:
 
         now = time.monotonic()
         if num in self.melee_weapons:
-            self.pending_switch = True
-            self.switch_time = now + 0.3
+            # 仅当这次切到近战是由“射击后切枪链”触发时，才自动继续跳过近战
+            if from_shot_chain:
+                self.pending_switch = True
+                self.switch_time = now + 0.08
+            else:
+                self.pending_switch = False
             self.switch_armed_by_shot = False
             self.block_fire_until = 0.0
         else:
@@ -275,6 +287,7 @@ class AutoClickerLowCPUOptimized:
         print("近战跳过:", self.melee_weapons)
         print("识别区域:", self.capture_region)
         print("红色阈值:", {"r_min": self.r_min, "g_max": self.g_max, "b_max": self.b_max})
+        print("环填充上限:", self.ring_fill_max)
         print("切枪延迟:", self.switch_delay, "| 最小开火后切枪:", self.min_switch_after_shot)
         print("=" * 60)
 
@@ -291,8 +304,9 @@ class AutoClickerLowCPUOptimized:
                 can_switch = self.current_weapon in self.melee_weapons or self.switch_armed_by_shot
                 if can_switch:
                     self.pending_switch = False
+                    shot_chain = self.switch_armed_by_shot
                     self.switch_armed_by_shot = False
-                    self.press_weapon_key(self.get_next_weapon())
+                    self.press_weapon_key(self.get_next_weapon(), from_shot_chain=shot_chain)
                     continue
                 # 未被射击事件武装的切枪请求：取消，避免只切不射
                 self.pending_switch = False

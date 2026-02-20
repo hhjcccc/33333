@@ -29,5 +29,6 @@
     "g_max": 25,
     "b_max": 25
   },
+  "ring_fill_max": 0.72,
   "stuck_rearm_time": 0.25
 }

@@ -98,6 +98,7 @@ class AutoClickerLowCPUOptimized:
         self.post_switch_block = float(self.config["post_switch_block"])
         self.pending_switch = False
         self.switch_time = 0.0
+        self.switch_armed_by_shot = False
         self.block_fire_until = 0.0
 
         # ---------- 武器 ----------
@@ -219,6 +220,7 @@ class AutoClickerLowCPUOptimized:
         if num in self.melee_weapons:
             self.pending_switch = True
             self.switch_time = now + 0.3
+            self.switch_armed_by_shot = False
             self.block_fire_until = 0.0
         else:
             self.block_fire_until = now + self.post_switch_block
@@ -282,13 +284,16 @@ class AutoClickerLowCPUOptimized:
             now = time.monotonic()
 
             if self.pending_switch and now >= self.switch_time:
-                # 只允许“已开火”或“当前是近战跳过”时切枪，防止出现只切不射
-                if self.current_weapon in self.melee_weapons or self.shot_fired_this_weapon:
+                # 近战跳过：按原逻辑直接切；射击触发切枪：用独立标记，避免红色短暂消失把 shot 状态清掉
+                can_switch = self.current_weapon in self.melee_weapons or self.switch_armed_by_shot
+                if can_switch:
                     self.pending_switch = False
+                    self.switch_armed_by_shot = False
                     self.press_weapon_key(self.get_next_weapon())
                     continue
-                # 非近战且本武器还没射击：取消这次切枪，优先保证先开火
+                # 未被射击事件武装的切枪请求：取消，避免只切不射
                 self.pending_switch = False
+                self.switch_armed_by_shot = False
 
             if now < self.block_fire_until:
                 time.sleep(self.sleep_interval)
@@ -340,6 +345,7 @@ class AutoClickerLowCPUOptimized:
 
                     if self.switch_weapon_mode and not self.pending_switch:
                         self.pending_switch = True
+                        self.switch_armed_by_shot = True
                         self.switch_time = now + self.switch_delay
             else:
                 if now - self.last_red_time > self.red_grace_time:

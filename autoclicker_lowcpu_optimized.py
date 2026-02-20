@@ -64,6 +64,14 @@ class AutoClickerLowCPUOptimized:
         self.target_hold_time = 0.01
         self.last_fire_time = 0.0
 
+        # ---------- 红色识别阈值 ----------
+        self.r_strict_min = 230
+        self.g_strict_max = 25
+        self.b_strict_max = 25
+        # 低饱和红（抗锯齿/亮度波动）兜底阈值
+        self.r_soft_min = 170
+        self.r_dom_delta = 40
+
         # ---------- 误检抑制 ----------
         # 环区域红色占比过高通常是纯红背景/大面积红光，不是准星环
         self.ring_fill_max = 0.72
@@ -124,12 +132,14 @@ class AutoClickerLowCPUOptimized:
     def capture(self, sct):
         return np.asarray(sct.grab(self.capture_region))
 
-    @staticmethod
-    def red_mask(img):
+    def red_mask(self, img):
         b = img[:, :, 0]
         g = img[:, :, 1]
         r = img[:, :, 2]
-        return (r >= 230) & (g < 25) & (b < 25)
+
+        strict = (r >= self.r_strict_min) & (g <= self.g_strict_max) & (b <= self.b_strict_max)
+        soft = (r >= self.r_soft_min) & ((r - g) >= self.r_dom_delta) & ((r - b) >= self.r_dom_delta)
+        return strict | soft
 
     def detect_ring(self, mask):
         ring_red = mask & self.annulus_mask
@@ -181,7 +191,12 @@ class AutoClickerLowCPUOptimized:
         if center.size > 0 and center.mean() > self.center_red_max:
             return False
 
-        return self.detect_ring(mask) or self.detect_cross(mask)
+        # 某些准星变红时只有中心小点发红，线段不稳定：给一个小点兜底
+        dot_half = 2
+        dot = mask[cy - dot_half : cy + dot_half + 1, cx - dot_half : cx + dot_half + 1]
+        center_dot_ok = dot.size > 0 and int(dot.sum()) >= 3
+
+        return self.detect_ring(mask) or self.detect_cross(mask) or center_dot_ok
 
     # ================= 状态 =================
 
@@ -275,6 +290,7 @@ class AutoClickerLowCPUOptimized:
         print("F2 启动/停止 | F3 退出 | F8 切枪模式")
         print("循环武器:", self.weapon_cycle)
         print("近战跳过:", self.melee_weapons)
+        print("红阈值 strict:", (self.r_strict_min, self.g_strict_max, self.b_strict_max), "soft:", (self.r_soft_min, self.r_dom_delta))
         print("阈值 ring_fill_max:", self.ring_fill_max, "cross_side_red_max:", self.cross_side_red_max)
         print("center_red_max:", self.center_red_max, "min_switch_after_shot:", self.min_switch_after_shot)
         print("=" * 60)

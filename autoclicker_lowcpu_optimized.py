@@ -1,9 +1,6 @@
-import argparse
-import json
 import threading
 import time
 from dataclasses import dataclass
-from pathlib import Path
 
 import mss
 import numpy as np
@@ -20,58 +17,9 @@ class DetectionState:
 
 
 class AutoClickerLowCPUOptimized:
-    """CPU 优化版：支持 JSON 配置文件。"""
+    """CPU 优化版：抑制纯红背景/红光晕误检 + 稳定切枪状态机。"""
 
-    DEFAULT_CONFIG = {
-        "region_half": 70,
-        "inner_r": 40,
-        "outer_r": 70,
-        "cross_r": 12,
-        "sleep_interval": 0.003,
-        "detect_interval": 0.0015,
-        "fire_cooldown": 0.06,
-        "red_grace_time": 0.09,
-        "max_red_hold_time": 0.2,
-        "switch_weapon_mode": False,
-        "switch_delay": 0.2,
-        "min_switch_after_shot": 0.14,
-        "post_switch_block": 0.3,
-        "weapon_cycle": [2, 3, 5, 4, 6],
-        "current_weapon": 2,
-        "melee_weapons": [3],
-        "target_hold_time": 0.01,
-        "stuck_rearm_time": 0.25,
-        "red_threshold": {"r_min": 230, "g_max": 25, "b_max": 25},
-        "ring_fill_max": 0.72,
-        "cross_side_red_max": 0.35,
-    }
-
-    @classmethod
-    def load_config(cls, config_path=None):
-        cfg = dict(cls.DEFAULT_CONFIG)
-        if not config_path:
-            return cfg
-
-        path = Path(config_path)
-        if not path.exists():
-            print(f"[WARN] 配置文件不存在，使用默认配置: {path}")
-            return cfg
-
-        with path.open("r", encoding="utf-8") as f:
-            user_cfg = json.load(f)
-
-        for k, v in user_cfg.items():
-            if k == "red_threshold" and isinstance(v, dict):
-                merged = dict(cfg["red_threshold"])
-                merged.update(v)
-                cfg["red_threshold"] = merged
-            else:
-                cfg[k] = v
-        return cfg
-
-    def __init__(self, config=None):
-        self.config = dict(self.DEFAULT_CONFIG if config is None else config)
-
+    def __init__(self):
         self.running = False
         self.exit_program = False
 
@@ -79,56 +27,56 @@ class AutoClickerLowCPUOptimized:
         self.cx, self.cy = self.sw // 2, self.sh // 2
 
         # ---------- 识别区域 ----------
-        self.region_half = int(self.config["region_half"])
-        self.inner_r = int(self.config["inner_r"])
-        self.outer_r = int(self.config["outer_r"])
-        self.cross_r = int(self.config["cross_r"])
+        self.region_half = 70
+        self.inner_r = 40
+        self.outer_r = 70
+        self.cross_r = 12
 
         # ---------- 时间参数 ----------
-        self.sleep_interval = float(self.config["sleep_interval"])
-        self.detect_interval = float(self.config["detect_interval"])
-        self.fire_cooldown = float(self.config["fire_cooldown"])
+        self.sleep_interval = 0.003
+        self.detect_interval = 0.0015
+        self.fire_cooldown = 0.06
 
         # ---------- 红色行为 ----------
-        self.red_grace_time = float(self.config["red_grace_time"])
-        self.max_red_hold_time = float(self.config["max_red_hold_time"])
+        self.red_grace_time = 0.09
+        self.max_red_hold_time = 0.2
         self.last_red_time = 0.0
         self.force_red_reset_time = 0.0
 
         # ---------- 切枪 ----------
-        self.switch_weapon_mode = bool(self.config["switch_weapon_mode"])
-        self.switch_delay = float(self.config["switch_delay"])
-        self.min_switch_after_shot = float(self.config.get("min_switch_after_shot", 0.14))
-        self.post_switch_block = float(self.config["post_switch_block"])
+        self.switch_weapon_mode = False
+        self.switch_delay = 0.1
+        self.min_switch_after_shot = 0.14
+        self.post_switch_block = 0.3
         self.pending_switch = False
         self.switch_time = 0.0
         self.switch_armed_by_shot = False
         self.block_fire_until = 0.0
 
         # ---------- 武器 ----------
-        self.weapon_cycle = list(self.config["weapon_cycle"])
-        self.current_weapon = int(self.config["current_weapon"])
-        self.melee_weapons = set(self.config["melee_weapons"])
+        self.weapon_cycle = [2, 3, 5, 4, 6]
+        self.current_weapon = 2
+        self.melee_weapons = {3}
 
         # ---------- 射击状态 ----------
         self.shot_fired_this_weapon = False
         self.target_hold_start = 0.0
-        self.weapon_seen_red_since = 0.0
-        self.target_hold_time = float(self.config["target_hold_time"])
-        self.stuck_rearm_time = float(self.config.get("stuck_rearm_time", 0.25))
+        self.target_hold_time = 0.01
         self.last_fire_time = 0.0
 
-        # ---------- 红色阈值 ----------
-        thr = self.config["red_threshold"]
-        self.r_min = int(thr["r_min"])
-        self.g_max = int(thr["g_max"])
-        self.b_max = int(thr["b_max"])
-        self.ring_fill_max = float(self.config.get("ring_fill_max", 0.72))
-        self.cross_side_red_max = float(self.config.get("cross_side_red_max", 0.35))
+        # ---------- 误检抑制 ----------
+        # 环区域红色占比过高通常是纯红背景/大面积红光，不是准星环
+        self.ring_fill_max = 0.72
+        # 十字检测时，侧向参考线允许的红色占比上限
+        self.cross_side_red_max = 0.35
+        # 中心区域过红通常是身体红光晕贴脸，不是准星图案
+        self.center_red_max = 0.45
+        self.center_half = 8
 
         self.click_count = 0
 
-        # mss 句柄线程内创建
+        # 注意：mss 在 Windows 下内部句柄是 thread-local 的，
+        # 不能在一个线程创建后在另一个线程直接复用。
         self.sct = None
         self.capture_region = {
             "left": self.cx - self.region_half,
@@ -140,11 +88,15 @@ class AutoClickerLowCPUOptimized:
         self.h = self.capture_region["height"]
         self.w = self.capture_region["width"]
 
+        # 预计算几何掩码：避免每帧 np.where + for + hypot
         self.annulus_mask, self.dir_masks = self._build_ring_masks()
 
+        # 跨线程检测状态
         self._det_state = DetectionState()
         self._det_lock = threading.Lock()
         self._det_thread = None
+
+    # ================= 预计算 =================
 
     def _build_ring_masks(self):
         y, x = np.ogrid[: self.h, : self.w]
@@ -154,6 +106,7 @@ class AutoClickerLowCPUOptimized:
         d = np.hypot(dx, dy)
 
         annulus = (d >= self.inner_r) & (d <= self.outer_r)
+
         dir_masks = {
             "L": (np.abs(dy) < 8) & (dx < 0),
             "R": (np.abs(dy) < 8) & (dx > 0),
@@ -166,14 +119,17 @@ class AutoClickerLowCPUOptimized:
         }
         return annulus, dir_masks
 
+    # ================= 图像 =================
+
     def capture(self, sct):
         return np.asarray(sct.grab(self.capture_region))
 
-    def red_mask(self, img):
+    @staticmethod
+    def red_mask(img):
         b = img[:, :, 0]
         g = img[:, :, 1]
         r = img[:, :, 2]
-        return (r >= self.r_min) & (g < self.g_max) & (b < self.b_max)
+        return (r >= 230) & (g < 25) & (b < 25)
 
     def detect_ring(self, mask):
         ring_red = mask & self.annulus_mask
@@ -181,7 +137,6 @@ class AutoClickerLowCPUOptimized:
         if red_pixels < 10:
             return False
 
-        # 纯红背景会把整圈填满，容易误判成“红圈准星”
         fill_ratio = red_pixels / float(self.annulus_mask.sum())
         if fill_ratio > self.ring_fill_max:
             return False
@@ -198,7 +153,6 @@ class AutoClickerLowCPUOptimized:
         cx, cy = self.w // 2, self.h // 2
         r = self.cross_r
 
-        # 纵向十字：中心列有红，且两侧列不应大面积发红（可过滤纯红背景）
         v_up = mask[cy - r : cy, cx]
         v_dn = mask[cy + 1 : cy + r, cx]
         if v_up.any() and v_dn.any() and 1 < cx < self.w - 2:
@@ -207,7 +161,6 @@ class AutoClickerLowCPUOptimized:
             if side_l.mean() <= self.cross_side_red_max and side_r.mean() <= self.cross_side_red_max:
                 return True
 
-        # 横向十字：中心行有红，且上下行不应大面积发红
         h_l = mask[cy, cx - r : cx]
         h_r = mask[cy, cx + 1 : cx + r]
         if h_l.any() and h_r.any() and 1 < cy < self.h - 2:
@@ -220,16 +173,27 @@ class AutoClickerLowCPUOptimized:
 
     def detect_crosshair(self, img):
         mask = self.red_mask(img)
+
+        # 中心区域若几乎被红色淹没，多数是红光晕/纯红背景
+        cx, cy = self.w // 2, self.h // 2
+        ch = self.center_half
+        center = mask[cy - ch : cy + ch, cx - ch : cx + ch]
+        if center.size > 0 and center.mean() > self.center_red_max:
+            return False
+
         return self.detect_ring(mask) or self.detect_cross(mask)
+
+    # ================= 状态 =================
 
     def reset_red_state(self):
         self.last_red_time = 0.0
         self.force_red_reset_time = 0.0
         self.target_hold_start = 0.0
-        self.weapon_seen_red_since = 0.0
 
     def reset_per_weapon_fire_state(self):
         self.shot_fired_this_weapon = False
+
+    # ================= 武器 =================
 
     def get_next_weapon(self):
         idx = self.weapon_cycle.index(self.current_weapon)
@@ -247,7 +211,6 @@ class AutoClickerLowCPUOptimized:
 
         now = time.monotonic()
         if num in self.melee_weapons:
-            # 仅当这次切到近战是由“射击后切枪链”触发时，才自动继续跳过近战
             if from_shot_chain:
                 self.pending_switch = True
                 self.switch_time = now + 0.08
@@ -258,12 +221,16 @@ class AutoClickerLowCPUOptimized:
         else:
             self.block_fire_until = now + self.post_switch_block
 
+    # ================= 鼠标 =================
+
     def click_left(self):
         win32api.mouse_event(win32con.MOUSEEVENTF_LEFTDOWN, 0, 0, 0, 0)
         time.sleep(0.005)
         win32api.mouse_event(win32con.MOUSEEVENTF_LEFTUP, 0, 0, 0, 0)
         self.click_count += 1
         self.last_fire_time = time.monotonic()
+
+    # ================= 键盘 =================
 
     def on_press(self, key):
         if key == pynput_keyboard.Key.f2:
@@ -276,6 +243,8 @@ class AutoClickerLowCPUOptimized:
             self.switch_weapon_mode = not self.switch_weapon_mode
             time.sleep(0.15)
         return None
+
+    # ================= 检测线程 =================
 
     def _detection_worker(self):
         sct = mss.mss()
@@ -298,16 +267,16 @@ class AutoClickerLowCPUOptimized:
         with self._det_lock:
             return self._det_state.detected, self._det_state.ts
 
+    # ================= 主循环（动作状态机） =================
+
     def run(self):
         print("=" * 60)
-        print("Pixel Gun 3D 自动射击（CPU 优化版 / 配置文件版）")
+        print("Pixel Gun 3D 自动射击（CPU 优化版）")
         print("F2 启动/停止 | F3 退出 | F8 切枪模式")
         print("循环武器:", self.weapon_cycle)
         print("近战跳过:", self.melee_weapons)
-        print("识别区域:", self.capture_region)
-        print("红色阈值:", {"r_min": self.r_min, "g_max": self.g_max, "b_max": self.b_max})
-        print("环填充上限:", self.ring_fill_max, "| 十字侧向红比例上限:", self.cross_side_red_max)
-        print("切枪延迟:", self.switch_delay, "| 最小开火后切枪:", self.min_switch_after_shot)
+        print("阈值 ring_fill_max:", self.ring_fill_max, "cross_side_red_max:", self.cross_side_red_max)
+        print("center_red_max:", self.center_red_max, "min_switch_after_shot:", self.min_switch_after_shot)
         print("=" * 60)
 
         pynput_keyboard.Listener(on_press=self.on_press).start()
@@ -319,7 +288,6 @@ class AutoClickerLowCPUOptimized:
             now = time.monotonic()
 
             if self.pending_switch and now >= self.switch_time:
-                # 近战跳过：按原逻辑直接切；射击触发切枪：用独立标记，避免红色短暂消失把 shot 状态清掉
                 can_switch = self.current_weapon in self.melee_weapons or self.switch_armed_by_shot
                 if can_switch:
                     self.pending_switch = False
@@ -327,7 +295,6 @@ class AutoClickerLowCPUOptimized:
                     self.switch_armed_by_shot = False
                     self.press_weapon_key(self.get_next_weapon(), from_shot_chain=shot_chain)
                     continue
-                # 未被射击事件武装的切枪请求：取消，避免只切不射
                 self.pending_switch = False
                 self.switch_armed_by_shot = False
 
@@ -355,17 +322,6 @@ class AutoClickerLowCPUOptimized:
 
                 self.last_red_time = now
 
-                # 连续红光晕场景：如果长时间检测到红色但本武器仍未开火，强制重置 hold 重新触发
-                if self.weapon_seen_red_since == 0.0:
-                    self.weapon_seen_red_since = now
-                elif (
-                    not self.shot_fired_this_weapon
-                    and self.current_weapon not in self.melee_weapons
-                    and now - self.weapon_seen_red_since >= self.stuck_rearm_time
-                ):
-                    self.target_hold_start = now
-                    self.weapon_seen_red_since = now
-
                 can_fire = (
                     self.target_hold_start > 0
                     and now - self.target_hold_start >= self.target_hold_time
@@ -382,8 +338,7 @@ class AutoClickerLowCPUOptimized:
                     if self.switch_weapon_mode and not self.pending_switch:
                         self.pending_switch = True
                         self.switch_armed_by_shot = True
-                        switch_wait = max(self.switch_delay, self.min_switch_after_shot)
-                        self.switch_time = now + switch_wait
+                        self.switch_time = now + max(self.switch_delay, self.min_switch_after_shot)
             else:
                 if now - self.last_red_time > self.red_grace_time:
                     self.reset_red_state()
@@ -394,18 +349,6 @@ class AutoClickerLowCPUOptimized:
         print("程序结束，总射击次数:", self.click_count)
 
 
-def parse_args():
-    parser = argparse.ArgumentParser(description="AutoClicker CPU 优化版（配置文件）")
-    parser.add_argument(
-        "--config",
-        default="autoclicker_config.json",
-        help="JSON 配置文件路径（默认: autoclicker_config.json）",
-    )
-    return parser.parse_args()
-
-
 if __name__ == "__main__":
     pyautogui.FAILSAFE = True
-    args = parse_args()
-    config = AutoClickerLowCPUOptimized.load_config(args.config)
-    AutoClickerLowCPUOptimized(config=config).run()
+    AutoClickerLowCPUOptimized().run()

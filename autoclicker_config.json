@@ -1,0 +1,35 @@
+{
+  "region_half": 70,
+  "inner_r": 40,
+  "outer_r": 70,
+  "cross_r": 12,
+  "sleep_interval": 0.003,
+  "detect_interval": 0.0015,
+  "fire_cooldown": 0.06,
+  "red_grace_time": 0.09,
+  "max_red_hold_time": 0.2,
+  "switch_weapon_mode": false,
+  "switch_delay": 0.2,
+  "min_switch_after_shot": 0.14,
+  "post_switch_block": 0.3,
+  "weapon_cycle": [
+    2,
+    3,
+    5,
+    4,
+    6
+  ],
+  "current_weapon": 2,
+  "melee_weapons": [
+    3
+  ],
+  "target_hold_time": 0.01,
+  "red_threshold": {
+    "r_min": 230,
+    "g_max": 25,
+    "b_max": 25
+  },
+  "ring_fill_max": 0.72,
+  "cross_side_red_max": 0.35,
+  "stuck_rearm_time": 0.25
+}

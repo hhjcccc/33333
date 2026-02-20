@@ -43,6 +43,7 @@ class AutoClickerLowCPUOptimized:
         "stuck_rearm_time": 0.25,
         "red_threshold": {"r_min": 230, "g_max": 25, "b_max": 25},
         "ring_fill_max": 0.72,
+        "cross_side_red_max": 0.35,
     }
 
     @classmethod
@@ -123,6 +124,7 @@ class AutoClickerLowCPUOptimized:
         self.g_max = int(thr["g_max"])
         self.b_max = int(thr["b_max"])
         self.ring_fill_max = float(self.config.get("ring_fill_max", 0.72))
+        self.cross_side_red_max = float(self.config.get("cross_side_red_max", 0.35))
 
         self.click_count = 0
 
@@ -195,9 +197,26 @@ class AutoClickerLowCPUOptimized:
     def detect_cross(self, mask):
         cx, cy = self.w // 2, self.h // 2
         r = self.cross_r
-        return (mask[cy - r : cy, cx].any() and mask[cy + 1 : cy + r, cx].any()) or (
-            mask[cy, cx - r : cx].any() and mask[cy, cx + 1 : cx + r].any()
-        )
+
+        # 纵向十字：中心列有红，且两侧列不应大面积发红（可过滤纯红背景）
+        v_up = mask[cy - r : cy, cx]
+        v_dn = mask[cy + 1 : cy + r, cx]
+        if v_up.any() and v_dn.any() and 1 < cx < self.w - 2:
+            side_l = mask[cy - r : cy + r, cx - 2]
+            side_r = mask[cy - r : cy + r, cx + 2]
+            if side_l.mean() <= self.cross_side_red_max and side_r.mean() <= self.cross_side_red_max:
+                return True
+
+        # 横向十字：中心行有红，且上下行不应大面积发红
+        h_l = mask[cy, cx - r : cx]
+        h_r = mask[cy, cx + 1 : cx + r]
+        if h_l.any() and h_r.any() and 1 < cy < self.h - 2:
+            side_u = mask[cy - 2, cx - r : cx + r]
+            side_d = mask[cy + 2, cx - r : cx + r]
+            if side_u.mean() <= self.cross_side_red_max and side_d.mean() <= self.cross_side_red_max:
+                return True
+
+        return False
 
     def detect_crosshair(self, img):
         mask = self.red_mask(img)
@@ -287,7 +306,7 @@ class AutoClickerLowCPUOptimized:
         print("近战跳过:", self.melee_weapons)
         print("识别区域:", self.capture_region)
         print("红色阈值:", {"r_min": self.r_min, "g_max": self.g_max, "b_max": self.b_max})
-        print("环填充上限:", self.ring_fill_max)
+        print("环填充上限:", self.ring_fill_max, "| 十字侧向红比例上限:", self.cross_side_red_max)
         print("切枪延迟:", self.switch_delay, "| 最小开火后切枪:", self.min_switch_after_shot)
         print("=" * 60)
 

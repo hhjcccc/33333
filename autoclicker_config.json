@@ -30,5 +30,6 @@
     "b_max": 25
   },
   "ring_fill_max": 0.72,
+  "cross_side_red_max": 0.35,
   "stuck_rearm_time": 0.25
 }
